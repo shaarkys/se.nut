@@ -6,7 +6,10 @@ const { parseUPSStatus } = require('../../lib/Utils');
 
 class UPSDriver extends Driver {
 
-  nut;
+  constructor(...args) {
+    super(...args)
+    this.nut = null;
+  }
 
   // Pairing
   onPair(session) {

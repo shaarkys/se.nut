@@ -1,74 +1,90 @@
-'use strict';
+"use strict";
 
-const { Device } = require('homey');
-const { parseUPSStatus } = require('../../lib/Utils');
-const Nut = require('../../lib/node-nut');
+const { Device } = require("homey");
+const { parseUPSStatus } = require("../../lib/Utils");
+const Nut = require("../../lib/node-nut");
 
 class UPSDevice extends Device {
-
-  nut;
+  constructor(...args) {
+    super(...args);
+    this.nut = null;
+  }
 
   /**
    * onInit is called when the device is initialized.
    */
   async onInit() {
+    this.setUnavailable("Initializing...");
     this.initNut();
 
     this.device = this.getData();
-    const updateInterval = Number(this.getSetting('interval')) * 1000;
+    const updateInterval = Number(this.getSetting("interval")) * 1000;
     const { device } = this;
     this.log(`[${this.getName()}][${device.id}]`, `Update Interval: ${updateInterval}`);
-    this.log(`[${this.getName()}][${device.id}]`, 'Connected to device');
+    this.log(`[${this.getName()}][${device.id}]`, "Connected to device");
     this.interval = setInterval(async () => {
       await this.getDeviceData();
     }, updateInterval);
 
-    this.log('UPS device has been initialized');
+    this.log("UPS device has been initialized");
   }
 
   async getDeviceData() {
     const { device } = this;
-    this.log(`[${this.getName()}][${device.id}]`, 'Refresh device');
+    this.log(`[${this.getName()}][${device.id}]`, "Refresh device");
 
-    await this.nut.start()
-      .then(() => this.nut.SetUsername(this.getSetting.username))
-      .then(() => this.nut.SetPassword(this.getSetting.password))
-      .then(() => this.nut.GetUPSVars(device.name))
-      .then((res) => {
-        this.log(res);
-        return parseUPSStatus(res);
-      })
-      .then((res) => {
-        this.log(res);
-        this.setCapabilities(res);
-      })
-      .catch((err) => this.log(err))
-      .finally(() => {
-        this.nut.close();
-      });
+    try {
+      await this.nut.start();
+      await this.nut.SetUsername(this.getSetting("username"));
+      await this.nut.SetPassword(this.getSetting("password"));
+      const res = await this.nut.GetUPSVars(device.name);
+      this.log(res);
+      const status = parseUPSStatus(res);
+      this.log(status);
+      this.setCapabilities(status);
+      // Mark device as available after a successful reading
+      this.setAvailable();
+    } catch (err) {
+      this.log(err);
+      // Mark device as unavailable if a connection error occurs
+      this.setUnavailable(`Connection error: ${err.message || err}`);
+    } finally {
+      this.nut.close();
+    }
   }
 
   initNut() {
-    this.nut = new Nut(parseInt(this.getSetting('port'), 10), this.getSetting('ip'));
+    this.nut = new Nut(parseInt(this.getSetting("port"), 10), this.getSetting("ip"));
 
-    this.nut.on('error', (err) => {
+    this.nut.on("error", (err) => {
       this.log(`There was an error: ${err}`);
     });
 
-    this.nut.on('close', () => {
-      this.log('Connection closed.');
+    this.nut.on("close", () => {
+      this.log("Connection closed.");
     });
   }
 
   setCapabilities(status) {
-    const firstRun = this.getStoreValue('first_run');
-    const deviceCapabilities = this.getStoreValue('capabilities');
+    // Dynamically add ups.load capability if available and not already added
+    if (status.values.measure_load != null && !this.hasCapability("measure_load")) {
+      this.addCapability("measure_load");
+      this.log("Added dynamic capability: measure_load");
+    }
+    // Dynamically add battery.voltage capability if available and not already added
+    if (status.values.measure_battery_voltage != null && !this.hasCapability("measure_battery_voltage")) {
+      this.addCapability("measure_battery_voltage");
+      this.log("Added dynamic capability: measure_battery_voltage");
+    }
+
+    const firstRun = this.getStoreValue("first_run");
+    let deviceCapabilities = this.getStoreValue("capabilities");
 
     if (firstRun != null && firstRun) {
       /*
-      * Go through all capabilities on the driver and remove those not supported by device.
-      */
-      this.log('Running setCapabilities for the first time');
+       * Go through all capabilities on the driver and remove those not supported by device.
+       */
+      this.log("Running setCapabilities for the first time");
       const allCapabilities = this.getCapabilities();
       allCapabilities.forEach((capability) => {
         if (!deviceCapabilities.includes(capability)) {
@@ -76,15 +92,22 @@ class UPSDevice extends Device {
           this.log(`Removing capability not supported by device [${capability}]`);
         }
       });
-      this.setStoreValue('first_run', false);
+      this.setStoreValue("first_run", false);
+    }
+
+    // Merge stored capabilities with new ones from the current status
+    if (!deviceCapabilities) {
+      deviceCapabilities = status.capabilities;
+    } else {
+      deviceCapabilities = Array.from(new Set([...deviceCapabilities, ...status.capabilities]));
     }
 
     const capabilityList = deviceCapabilities == null ? status.capabilities : deviceCapabilities;
     capabilityList.forEach((capability) => {
-      const isSubCapability = capability.split('.').length > 1;
+      const isSubCapability = capability.split(".").length > 1;
       if (isSubCapability) {
-        const capabilityName = capability.split('.')[0];
-        const subCapabilityName = capability.split('.').pop();
+        const capabilityName = capability.split(".")[0];
+        const subCapabilityName = capability.split(".").pop();
         this.updateValue(`${[capabilityName]}.${[subCapabilityName]}`, status.values[capabilityName][subCapabilityName]);
       } else {
         this.updateValue(capability, status.values[capability]);
@@ -94,19 +117,18 @@ class UPSDevice extends Device {
 
   updateValue(capability, value) {
     this.log(`Setting capability [${capability}] value to: ${value}`);
-    this.setCapabilityValue(capability, value)
-      .catch(this.error);
+    this.setCapabilityValue(capability, value).catch(this.error);
   }
 
   /**
    * onAdded is called when the user adds the device, called just after pairing.
    */
   async onAdded() {
-    this.log('device added');
-    this.log('name:', this.getName());
-    this.log('class:', this.getClass());
-    this.log('data', this.getData());
-    this.log('capabilities', this.getStoreValue('capabilities'));
+    this.log("device added");
+    this.log("name:", this.getName());
+    this.log("class:", this.getClass());
+    this.log("data", this.getData());
+    this.log("capabilities", this.getStoreValue("capabilities"));
   }
 
   /**
@@ -117,15 +139,11 @@ class UPSDevice extends Device {
    * @param {string[]} event.changedKeys An array of keys changed since the previous version
    * @returns {Promise<string|void>} return a custom message that will be displayed
    */
-  async onSettings({
-    oldSettings,
-    newSettings,
-    changedKeys,
-  }) {
+  async onSettings({ oldSettings, newSettings, changedKeys }) {
     const { interval } = this;
     for (const name of changedKeys) {
       /* Log setting changes except for password */
-      if (name !== 'password') {
+      if (name !== "password") {
         this.log(`Setting '${name}' set '${oldSettings[name]}' => '${newSettings[name]}'`);
       }
     }
@@ -157,14 +175,10 @@ class UPSDevice extends Device {
    * onDeleted is called when the user deleted the device.
    */
   async onDeleted() {
-    const {
-      interval,
-      device,
-    } = this;
+    const { interval, device } = this;
     this.log(`${device.name} deleted`);
     clearInterval(interval);
   }
-
 }
 
 module.exports = UPSDevice;
